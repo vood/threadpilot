@@ -95,7 +95,7 @@ func (a *app) runBrowserModeRemote(mode string, extraEnv map[string]string) (pay
 		return nil, err
 	}
 
-	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), wsEndpoint)
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), wsEndpoint, chromedp.NoModifyURL)
 	defer allocCancel()
 
 	ctx, cancel := chromedp.NewContext(allocCtx)
