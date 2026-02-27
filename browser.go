@@ -77,7 +77,7 @@ func (a *app) runBrowserModeNative(mode string, extraEnv map[string]string) (pay
 	allocCtx, allocCancel := chromedp.NewExecAllocator(context.Background(), allocOpts...)
 	defer allocCancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithBrowserOption(chromedp.WithDialTimeout(a.browserAttachTimeout())))
 	defer cancel()
 
 	defer func() {
@@ -98,7 +98,7 @@ func (a *app) runBrowserModeRemote(mode string, extraEnv map[string]string) (pay
 	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), wsEndpoint, chromedp.NoModifyURL)
 	defer allocCancel()
 
-	ctx, cancel := chromedp.NewContext(allocCtx)
+	ctx, cancel := chromedp.NewContext(allocCtx, chromedp.WithBrowserOption(chromedp.WithDialTimeout(a.browserAttachTimeout())))
 	defer cancel()
 
 	defer func() {
@@ -108,6 +108,14 @@ func (a *app) runBrowserModeRemote(mode string, extraEnv map[string]string) (pay
 	}()
 
 	return a.runBrowserModeWithContext(ctx, mode, extraEnv)
+}
+
+func (a *app) browserAttachTimeout() time.Duration {
+	timeout := a.browserLaunchTimeout()
+	if timeout < 45*time.Second {
+		return 45 * time.Second
+	}
+	return timeout
 }
 
 func (a *app) runBrowserModeWithContext(ctx context.Context, mode string, extraEnv map[string]string) (map[string]interface{}, error) {

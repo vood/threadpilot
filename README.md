@@ -84,3 +84,4 @@ Environment shortcuts:
 
 - Persistent profile default: `~/.threadpilot-profile`
 - `--proxy` is supported for HTTP and browser-backed workflows.
+- Cloud browser endpoints can take longer to accept the first websocket connection; `threadpilot` uses a longer attach timeout automatically.
