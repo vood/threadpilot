@@ -23,14 +23,16 @@ const (
 )
 
 type app struct {
-	client      *http.Client
-	userAgent   string
-	accessToken string
-	proxy       string
-	profileDir  string
-	headless    bool
-	loginWait   int
-	holdOnError int
+	client            *http.Client
+	userAgent         string
+	accessToken       string
+	proxy             string
+	profileDir        string
+	browserWSEndpoint string
+	browserDebugURL   string
+	headless          bool
+	loginWait         int
+	holdOnError       int
 }
 
 type listingResponse struct {
@@ -101,6 +103,25 @@ func Run(args []string) error {
 	userAgent := root.String("user-agent", defaultUserAgent, "User-Agent header")
 	token := root.String("token", strings.TrimSpace(os.Getenv("REDDIT_ACCESS_TOKEN")), "Reddit OAuth access token (defaults to REDDIT_ACCESS_TOKEN)")
 	browserProfile := root.String("browser-profile", profileDefault(), "Persistent browser profile directory")
+	browserWSEndpoint := root.String(
+		"browser-ws-endpoint",
+		firstNonEmpty(
+			strings.TrimSpace(os.Getenv("THREADPILOT_BROWSER_WS_URL")),
+			strings.TrimSpace(os.Getenv("REDDIT_BROWSER_WS_URL")),
+			strings.TrimSpace(os.Getenv("GOLOGIN_WS_URL")),
+			strings.TrimSpace(os.Getenv("GOLOGIN_WS_ENDPOINT")),
+		),
+		"Attach to an existing Chromium-compatible browser via CDP WebSocket URL (supports GoLogin-style endpoints)",
+	)
+	browserDebugURL := root.String(
+		"browser-debug-url",
+		firstNonEmpty(
+			strings.TrimSpace(os.Getenv("THREADPILOT_BROWSER_DEBUG_URL")),
+			strings.TrimSpace(os.Getenv("REDDIT_BROWSER_DEBUG_URL")),
+			strings.TrimSpace(os.Getenv("GOLOGIN_DEBUG_URL")),
+		),
+		"Attach to an existing browser via DevTools HTTP endpoint (base URL or /json/version URL)",
+	)
 	browserHeadless := root.Bool("browser-headless", envBool("REDDIT_HEADLESS"), "Run browser automation in headless mode")
 	loginTimeout := root.Int("login-timeout", envInt("REDDIT_LOGIN_TIMEOUT_SEC", 180), "Browser login timeout in seconds")
 	holdOnError := root.Int("hold-on-error", envInt("REDDIT_HOLD_ON_ERROR_SEC", 0), "Keep browser open on errors for N seconds")
@@ -121,14 +142,16 @@ func Run(args []string) error {
 	}
 
 	a := &app{
-		client:      client,
-		userAgent:   strings.TrimSpace(*userAgent),
-		accessToken: strings.TrimSpace(*token),
-		proxy:       strings.TrimSpace(*proxy),
-		profileDir:  strings.TrimSpace(*browserProfile),
-		headless:    *browserHeadless,
-		loginWait:   *loginTimeout,
-		holdOnError: *holdOnError,
+		client:            client,
+		userAgent:         strings.TrimSpace(*userAgent),
+		accessToken:       strings.TrimSpace(*token),
+		proxy:             strings.TrimSpace(*proxy),
+		profileDir:        strings.TrimSpace(*browserProfile),
+		browserWSEndpoint: strings.TrimSpace(*browserWSEndpoint),
+		browserDebugURL:   strings.TrimSpace(*browserDebugURL),
+		headless:          *browserHeadless,
+		loginWait:         *loginTimeout,
+		holdOnError:       *holdOnError,
 	}
 	if a.userAgent == "" {
 		a.userAgent = defaultUserAgent
@@ -709,7 +732,11 @@ func (a *app) runPost(args []string) error {
 }
 
 func (a *app) runBrowserMode(mode string, extraEnv map[string]string) (map[string]interface{}, error) {
-	return a.runBrowserModeNative(mode, extraEnv)
+	payload, err := a.runBrowserModeRemote(mode, extraEnv)
+	if err != nil {
+		return nil, fmt.Errorf("browser mode %q failed: %w", mode, err)
+	}
+	return payload, nil
 }
 
 func (a *app) readThread(permalink string, limit int) error {
@@ -1020,7 +1047,7 @@ func isAllowed(value string, allowed []string) bool {
 
 func printRootUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
-	fmt.Fprintln(os.Stderr, "  threadpilot [--proxy URL] [--browser-profile DIR] [--browser-headless] [--user-agent UA] [--token TOKEN] <command> [flags]")
+	fmt.Fprintln(os.Stderr, "  threadpilot [--proxy URL] [--browser-profile DIR] [--browser-ws-endpoint URL] [--browser-debug-url URL] [--browser-headless] [--user-agent UA] [--token TOKEN] <command> [flags]")
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Commands:")
 	fmt.Fprintln(os.Stderr, "  login   Open browser session and wait for Reddit login")
@@ -1038,6 +1065,8 @@ func printRootUsage() {
 	fmt.Fprintln(os.Stderr, "")
 	fmt.Fprintln(os.Stderr, "Examples:")
 	fmt.Fprintln(os.Stderr, "  threadpilot login")
+	fmt.Fprintln(os.Stderr, "  threadpilot --browser-ws-endpoint \"$GOLOGIN_WS_URL\" whoami")
+	fmt.Fprintln(os.Stderr, "  threadpilot --browser-debug-url http://127.0.0.1:9222 whoami")
 	fmt.Fprintln(os.Stderr, "  threadpilot login --new-profile --username myuser --password-stdin <<< \"$REDDIT_LOGIN_PASSWORD\"")
 	fmt.Fprintln(os.Stderr, "  threadpilot login --username myuser --password-stdin <<< \"$REDDIT_LOGIN_PASSWORD\"")
 	fmt.Fprintln(os.Stderr, "  threadpilot whoami")

@@ -86,38 +86,146 @@ func (a *app) runBrowserModeNative(mode string, extraEnv map[string]string) (pay
 		}
 	}()
 
-	if err = a.browserNavigate(ctx, redditBaseURL+"/"); err != nil {
+	return a.runBrowserModeWithContext(ctx, mode, extraEnv)
+}
+
+func (a *app) runBrowserModeRemote(mode string, extraEnv map[string]string) (payload map[string]interface{}, err error) {
+	wsEndpoint, err := a.resolveBrowserWSEndpoint()
+	if err != nil {
+		return nil, err
+	}
+
+	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), wsEndpoint)
+	defer allocCancel()
+
+	ctx, cancel := chromedp.NewContext(allocCtx)
+	defer cancel()
+
+	defer func() {
+		if err != nil && a.holdOnError > 0 && !a.headless {
+			time.Sleep(time.Duration(a.holdOnError) * time.Second)
+		}
+	}()
+
+	return a.runBrowserModeWithContext(ctx, mode, extraEnv)
+}
+
+func (a *app) runBrowserModeWithContext(ctx context.Context, mode string, extraEnv map[string]string) (map[string]interface{}, error) {
+	if err := a.browserNavigate(ctx, redditBaseURL+"/"); err != nil {
 		return nil, fmt.Errorf("bootstrap navigate failed: %w", err)
 	}
 
 	switch mode {
 	case "login_phase":
-		payload, err = a.browserLoginPhase(ctx, extraEnv)
+		return a.browserLoginPhase(ctx, extraEnv)
 	case "preflight":
-		payload, err = a.browserPreflight(ctx, extraEnv)
+		return a.browserPreflight(ctx, extraEnv)
 	case "whoami":
-		payload, err = a.browserWhoami(ctx)
+		return a.browserWhoami(ctx)
 	case "my_comments":
-		payload, err = a.browserMyComments(ctx, extraEnv)
+		return a.browserMyComments(ctx, extraEnv)
 	case "my_replies":
-		payload, err = a.browserMyReplies(ctx, extraEnv)
+		return a.browserMyReplies(ctx, extraEnv)
 	case "my_posts":
-		payload, err = a.browserMyPosts(ctx, extraEnv)
+		return a.browserMyPosts(ctx, extraEnv)
 	case "my_subreddits":
-		payload, err = a.browserMySubreddits(ctx, extraEnv)
+		return a.browserMySubreddits(ctx, extraEnv)
 	case "subscribe":
-		payload, err = a.browserSubscribe(ctx, extraEnv)
+		return a.browserSubscribe(ctx, extraEnv)
 	case "like":
-		payload, err = a.browserLike(ctx, extraEnv)
+		return a.browserLike(ctx, extraEnv)
 	case "publish":
-		payload, err = a.browserPublish(ctx, extraEnv)
+		return a.browserPublish(ctx, extraEnv)
 	default:
 		return nil, fmt.Errorf("unsupported browser mode: %s", mode)
 	}
-	if err != nil {
-		return nil, fmt.Errorf("browser mode %q failed: %w", mode, err)
+}
+
+func (a *app) resolveBrowserWSEndpoint() (string, error) {
+	if raw := strings.TrimSpace(a.browserWSEndpoint); raw != "" {
+		return normalizeBrowserAttachEndpoint(raw)
 	}
-	return payload, nil
+	if raw := strings.TrimSpace(a.browserDebugURL); raw != "" {
+		return debuggerURLToWSEndpoint(raw)
+	}
+
+	execPath, err := resolveChromeExecPath()
+	if err != nil {
+		return "", err
+	}
+	wsEndpoint, _, err := a.ensureBrowserEndpoint(execPath)
+	if err != nil {
+		return "", err
+	}
+	return wsEndpoint, nil
+}
+
+func normalizeBrowserAttachEndpoint(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("browser attach endpoint is empty")
+	}
+	lower := strings.ToLower(raw)
+	switch {
+	case strings.HasPrefix(lower, "ws://"), strings.HasPrefix(lower, "wss://"):
+		return raw, nil
+	case strings.HasPrefix(lower, "http://"), strings.HasPrefix(lower, "https://"):
+		return debuggerURLToWSEndpoint(raw)
+	case strings.Contains(raw, ":") && !strings.Contains(raw, "://"):
+		return debuggerURLToWSEndpoint("http://" + raw)
+	default:
+		return "", fmt.Errorf("unsupported browser endpoint format: %s", raw)
+	}
+}
+
+func debuggerURLToWSEndpoint(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("browser debug url is empty")
+	}
+	if strings.Contains(raw, ":") && !strings.Contains(raw, "://") {
+		raw = "http://" + raw
+	}
+
+	parsed, err := neturl.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid browser debug url: %w", err)
+	}
+
+	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	switch scheme {
+	case "ws", "wss":
+		return parsed.String(), nil
+	case "http", "https":
+	default:
+		return "", fmt.Errorf("unsupported browser debug url scheme: %s", parsed.Scheme)
+	}
+
+	pathLower := strings.ToLower(strings.TrimSpace(parsed.Path))
+	if strings.Contains(pathLower, "/connect") {
+		if scheme == "https" {
+			parsed.Scheme = "wss"
+		} else {
+			parsed.Scheme = "ws"
+		}
+		return parsed.String(), nil
+	}
+
+	if pathLower == "" || pathLower == "/" {
+		parsed.Path = "/json/version"
+	} else if pathLower != "/json/version" && !strings.HasSuffix(pathLower, "/json/version") {
+		parsed.Path = strings.TrimRight(parsed.Path, "/") + "/json/version"
+	}
+
+	version, err := fetchDebuggerVersionURL(parsed.String())
+	if err != nil {
+		return "", err
+	}
+	ws := strings.TrimSpace(version.WebSocketDebuggerURL)
+	if ws == "" {
+		return "", errors.New("devtools endpoint did not return webSocketDebuggerUrl")
+	}
+	return ws, nil
 }
 
 func (a *app) ensureBrowserEndpoint(execPath string) (string, bool, error) {
@@ -312,6 +420,14 @@ func writeBrowserSessionMeta(path string, meta browserSessionMeta) error {
 
 func fetchDebuggerVersion(port int) (debuggerVersion, error) {
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/json/version", port)
+	return fetchDebuggerVersionURL(endpoint)
+}
+
+func fetchDebuggerVersionURL(endpoint string) (debuggerVersion, error) {
+	endpoint = strings.TrimSpace(endpoint)
+	if endpoint == "" {
+		return debuggerVersion{}, errors.New("debugger endpoint is empty")
+	}
 	client := &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
